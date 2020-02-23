@@ -141,6 +141,7 @@ export interface LookupUpdate {
   newDigestShort?: string;
   newMajor?: number;
   newMinor?: number;
+  newName?: string;
   newValue: string;
   newVersion?: string;
   semanticCommitType?: string;
@@ -187,6 +188,7 @@ export interface Upgrade<T = Record<string, any>>
   newDigest?: string;
   newFrom?: string;
   newMajor?: number;
+  newName?: string;
   newValue?: string;
   newVersion?: string;
   packageFile?: string;
