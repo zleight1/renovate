@@ -19,7 +19,12 @@ import { ensurePr, checkAutoMerge } from '../pr';
 import { RenovateConfig } from '../../config';
 import { platform } from '../../platform';
 import { emojify } from '../../util/emoji';
-import { BranchConfig, ProcessBranchResult, PrResult } from '../common';
+import {
+  BranchConfig,
+  PrResult,
+  ProcessBranchResult,
+  BranchResult,
+} from '../common';
 import {
   PLATFORM_AUTHENTICATION_ERROR,
   PLATFORM_BAD_CREDENTIALS,
@@ -55,6 +60,7 @@ function rebaseCheck(config: RenovateConfig, branchPr: any): boolean {
 export async function processBranch(
   branchConfig: BranchConfig,
   prHourlyLimitReached?: boolean,
+  alreadyAutomerged?: boolean,
   packageFiles?: AdditionalPackageFiles
 ): Promise<ProcessBranchResult> {
   const config: BranchConfig = { ...branchConfig };
@@ -68,8 +74,16 @@ export async function processBranch(
   );
   logger.trace({ config }, 'branch config');
   await platform.setBaseBranch(config.baseBranch);
-  const branchExists = await platform.branchExists(config.branchName);
+  let branchExists = !!(await platform.branchExists(config.branchName));
   const branchPr = await platform.getBranchPr(config.branchName);
+  const res: ProcessBranchResult = {
+    branchExists,
+    branchResult: branchExists
+      ? BranchResult.NotUpdated
+      : BranchResult.NotAttempted,
+    prExists: !!branchPr,
+    prResult: branchPr ? PrResult.NotUpdated : PrResult.NotAttempted,
+  };
   logger.debug(`branchExists=${branchExists}`);
   const masterIssueCheck = (config.masterIssueChecks || {})[config.branchName];
   // istanbul ignore if
@@ -131,7 +145,8 @@ export async function processBranch(
           'Merged PR is blocking this branch'
         );
       }
-      return 'already-existed';
+      res.branchResult = BranchResult.BlockedByClosedPr;
+      return res;
     }
     // istanbul ignore if
     if (!branchExists && config.masterIssueApproval) {
@@ -139,7 +154,8 @@ export async function processBranch(
         logger.debug(`Branch ${config.branchName} is approved for creation`);
       } else {
         logger.debug(`Branch ${config.branchName} needs approval`);
-        return 'needs-approval';
+        res.branchResult = BranchResult.AwaitingApproval;
+        return res;
       }
     }
     if (
@@ -151,9 +167,11 @@ export async function processBranch(
       logger.debug(
         'Reached PR creation limit or per run commits limit - skipping branch creation'
       );
-      return 'pr-hourly-limit-reached';
+      res.branchResult = BranchResult.AwaitingHourlyLimit;
+      return res;
     }
     if (branchExists) {
+      res.branchResult = BranchResult.NotUpdated; // default
       logger.debug('Checking if PR has been edited');
       if (branchPr) {
         logger.debug('Found existing branch PR');
@@ -196,7 +214,8 @@ export async function processBranch(
                 });
               }
             }
-            return 'pr-edited';
+            res.branchResult = BranchResult.BlockedByCommits;
+            return res;
           }
         }
       }
@@ -207,16 +226,19 @@ export async function processBranch(
     if (!config.isScheduledNow && !masterIssueCheck) {
       if (!branchExists) {
         logger.debug('Skipping branch creation as not within schedule');
-        return 'not-scheduled';
+        res.branchResult = BranchResult.AwaitingScheduledCreation;
+        return res;
       }
       if (config.updateNotScheduled === false && !config.rebaseRequested) {
         logger.debug('Skipping branch update as not within schedule');
-        return 'not-scheduled';
+        res.branchResult = BranchResult.AwaitingScheduledUpdate;
+        return res;
       }
       // istanbul ignore if
       if (!branchPr) {
         logger.debug('Skipping PR creation out of schedule');
-        return 'not-scheduled';
+        res.branchResult = BranchResult.AwaitingScheduledCreation;
+        return res;
       }
       logger.debug(
         'Branch + PR exists but is not scheduled -- will update if necessary'
@@ -233,7 +255,8 @@ export async function processBranch(
       logger.debug(
         'Skipping branch creation due to unpublishSafe + status checks'
       );
-      return 'pending';
+      res.branchResult = BranchResult.AwaitingStability;
+      return res;
     }
 
     if (
@@ -274,10 +297,12 @@ export async function processBranch(
         ['not-pending', 'status-success'].includes(config.prCreation)
       ) {
         logger.debug('Skipping branch creation due to stability days not met');
-        return 'pending';
+        res.branchResult = BranchResult.AwaitingStability;
+        return res;
       }
     }
-
+    // We don't want to do any work if previous branches have been automerged, because the base branch will be out of date
+    if (alreadyAutomerged) return res;
     // istanbul ignore if
     if (masterIssueCheck === 'rebase' || config.masterIssueRebaseAllOpen) {
       logger.debug('Manual rebase requested via master issue');
@@ -286,12 +311,14 @@ export async function processBranch(
       Object.assign(config, await getParentBranch(config));
     }
     logger.debug(`Using parentBranch: ${config.parentBranch}`);
-    const res = await getUpdatedPackageFiles(config);
+    const updatedFiles = await getUpdatedPackageFiles(config);
     // istanbul ignore if
-    if (res.artifactErrors && config.artifactErrors) {
-      res.artifactErrors = config.artifactErrors.concat(res.artifactErrors);
+    if (updatedFiles.artifactErrors && config.artifactErrors) {
+      updatedFiles.artifactErrors = config.artifactErrors.concat(
+        updatedFiles.artifactErrors
+      );
     }
-    Object.assign(config, res);
+    Object.assign(config, updatedFiles);
     if (config.updatedPackageFiles && config.updatedPackageFiles.length) {
       logger.debug(
         `Updated ${config.updatedPackageFiles.length} package files`
@@ -415,30 +442,44 @@ export async function processBranch(
         logger.debug('PR has no releaseTimestamp');
       }
     }
-
-    const commitHash = await commitFilesToBranch(config);
-    // TODO: Remove lockFileMaintenance rule?
-    if (
-      config.updateType === 'lockFileMaintenance' &&
-      !config.parentBranch &&
-      branchExists
-    ) {
-      logger.info(
-        'Deleting lock file maintenance branch as master lock file no longer needs updating'
-      );
-      if (config.dryRun) {
-        logger.info('DRY-RUN: Would delete lock file maintenance branch');
-      } else {
-        await platform.deleteBranch(config.branchName);
-      }
-      return 'done';
-    }
-    if (!commitHash && !branchExists) {
-      return 'no-work';
-    }
+    const { commitHash, reason } = await commitFilesToBranch(config);
     if (commitHash) {
-      const action = branchExists ? 'updated' : 'created';
-      logger.info({ commitHash }, `Branch ${action}`);
+      // a commit was made
+      if (branchExists) {
+        logger.info({ commitHash }, `Branch updated`);
+        res.branchResult = BranchResult.Rebased;
+      } else {
+        branchExists = true;
+        logger.info({ commitHash }, `Branch created`);
+        res.branchResult = BranchResult.Created;
+      }
+    } else {
+      // No commit was made
+      if (reason === 'dry-run') {
+        return res;
+      }
+      if (!branchExists) {
+        // No commit to make - branch aborted
+        res.branchResult = BranchResult.ErrorNoCommit;
+        return res;
+      }
+      // istanbul ignore if
+      if (config.updateType === 'lockFileMaintenance' && !config.parentBranch) {
+        // No lock file maintenance left to do
+        logger.info(
+          'Deleting lock file maintenance branch as master lock file no longer needs updating'
+        );
+        if (config.dryRun) {
+          logger.info('DRY-RUN: Would delete lock file maintenance branch');
+        } else {
+          await platform.deleteBranch(config.branchName);
+          res.branchExists = false;
+          res.branchResult = BranchResult.Deleted;
+        }
+        return res;
+      }
+      // We attempted to push a pointless commit
+      res.branchResult = BranchResult.PointlessRebase; // don't call it an error because it could have been a manually requested rebase
     }
     // Set branch statuses
     await setStability(config);
@@ -450,7 +491,9 @@ export async function processBranch(
       (config.requiredStatusChecks?.length || config.prCreation !== 'immediate')
     ) {
       logger.debug({ commitHash }, `Branch status pending`);
-      return 'pending';
+      res.branchExists = true;
+      res.prResult = PrResult.AwaitingNotPending;
+      return res;
     }
 
     // Try to automerge branch and finish if successful, but only if branch already existed before this run
@@ -459,7 +502,9 @@ export async function processBranch(
       logger.debug(`mergeStatus=${mergeStatus}`);
       if (mergeStatus === 'automerged') {
         logger.debug('Branch is automerged - returning');
-        return 'automerged';
+        res.branchExists = false;
+        res.branchResult = BranchResult.Automerged;
+        return res;
       }
       if (
         mergeStatus === 'automerge aborted - PR exists' ||
@@ -526,7 +571,8 @@ export async function processBranch(
       logger.warn('Error updating branch: update failure');
     } else if (err.message.startsWith('bundler-')) {
       // we have already warned inside the bundler artifacts error handling, so just return
-      return 'error';
+      res.branchResult = BranchResult.ErrorBundler;
+      return res;
     } else if (
       err.messagee &&
       err.message.includes('fatal: Authentication failed')
@@ -539,113 +585,104 @@ export async function processBranch(
       logger.error({ err }, `Error updating branch: ${err.message}`);
     }
     // Don't throw here - we don't want to stop the other renovations
-    return 'error';
+    res.branchResult = BranchResult.ErrorUnknown;
+    return res;
   }
+  let pr;
   try {
     logger.debug('Ensuring PR');
     logger.debug(
       `There are ${config.errors.length} errors and ${config.warnings.length} warnings`
     );
-    const { prResult: result, pr } = await ensurePr(config);
-    // TODO: ensurePr should check for automerge itself
-    if (result === PrResult.AwaitingApproval) {
-      return 'needs-pr-approval';
+    const ensurePrResult = await ensurePr(config);
+    pr = ensurePrResult.pr;
+    res.prExists = !!pr;
+    res.prResult = ensurePrResult.prResult;
+    if (!pr) {
+      return res;
     }
-    if (
-      result === PrResult.AwaitingGreenBranch ||
-      result === PrResult.AwaitingNotPending
-    ) {
-      return 'pending';
-    }
-    if (pr) {
-      const topic = emojify(':warning: Artifact update problem');
-      if (config.artifactErrors && config.artifactErrors.length) {
-        logger.warn(
-          { artifactErrors: config.artifactErrors },
-          'artifactErrors'
-        );
-        let content = `Renovate failed to update `;
-        content +=
-          config.artifactErrors.length > 1 ? 'artifacts' : 'an artifact';
-        content +=
-          ' related to this branch. You probably do not want to merge this PR as-is.';
-        content += emojify(
-          `\n\n:recycle: Renovate will retry this branch, including artifacts, only when one of the following happens:\n\n`
-        );
-        content +=
-          ' - any of the package files in this branch needs updating, or \n';
-        content += ' - the branch becomes conflicted, or\n';
-        content +=
-          ' - you check the rebase/retry checkbox if found above, or\n';
-        content +=
-          ' - you rename this PR\'s title to start with "rebase!" to trigger it manually';
-        content += '\n\nThe artifact failure details are included below:\n\n';
-        config.artifactErrors.forEach(error => {
-          content += `##### File name: ${error.lockFile}\n\n`;
-          content += `\`\`\`\n${error.stderr}\n\`\`\`\n\n`;
-        });
-        if (
-          !(
-            config.suppressNotifications.includes('artifactErrors') ||
-            config.suppressNotifications.includes('lockFileErrors')
-          )
-        ) {
-          if (config.dryRun) {
-            logger.info(
-              'DRY-RUN: Would ensure lock file error comment in PR #' +
-                pr.number
-            );
-          } else {
-            await platform.ensureComment({
-              number: pr.number,
-              topic,
-              content,
-            });
-            // TODO: remoe this soon once they're all cleared out
-            await platform.ensureCommentRemoval(
-              pr.number,
-              ':warning: Lock file problem'
-            );
-          }
+    const topic = emojify(':warning: Artifact update problem');
+    if (config.artifactErrors && config.artifactErrors.length) {
+      logger.warn({ artifactErrors: config.artifactErrors }, 'artifactErrors');
+      let content = `Renovate failed to update `;
+      content += config.artifactErrors.length > 1 ? 'artifacts' : 'an artifact';
+      content +=
+        ' related to this branch. You probably do not want to merge this PR as-is.';
+      content += emojify(
+        `\n\n:recycle: Renovate will retry this branch, including artifacts, only when one of the following happens:\n\n`
+      );
+      content +=
+        ' - any of the package files in this branch needs updating, or \n';
+      content += ' - the branch becomes conflicted, or\n';
+      content += ' - you check the rebase/retry checkbox if found above, or\n';
+      content +=
+        ' - you rename this PR\'s title to start with "rebase!" to trigger it manually';
+      content += '\n\nThe artifact failure details are included below:\n\n';
+      config.artifactErrors.forEach(error => {
+        content += `##### File name: ${error.lockFile}\n\n`;
+        content += `\`\`\`\n${error.stderr}\n\`\`\`\n\n`;
+      });
+      if (
+        !(
+          config.suppressNotifications.includes('artifactErrors') ||
+          config.suppressNotifications.includes('lockFileErrors')
+        )
+      ) {
+        if (config.dryRun) {
+          logger.info(
+            'DRY-RUN: Would ensure lock file error comment in PR #' + pr.number
+          );
+        } else {
+          await platform.ensureComment({
+            number: pr.number,
+            topic,
+            content,
+          });
+          // TODO: remoe this soon once they're all cleared out
+          await platform.ensureCommentRemoval(
+            pr.number,
+            ':warning: Lock file problem'
+          );
         }
-        const context = `renovate/artifacts`;
-        const description = 'Artifact file update failure';
-        const state = BranchStatus.red;
-        const existingState = await platform.getBranchStatusCheck(
-          config.branchName,
-          context
-        );
-        // Check if state needs setting
-        if (existingState !== state) {
-          logger.debug(`Updating status check state to failed`);
-          if (config.dryRun) {
-            logger.info(
-              'DRY-RUN: Would set branch status in ' + config.branchName
-            );
-          } else {
-            await platform.setBranchStatus({
-              branchName: config.branchName,
-              context,
-              description,
-              state,
-            });
-          }
+      }
+      const context = `renovate/artifacts`;
+      const description = 'Artifact file update failure';
+      const state = BranchStatus.red;
+      const existingState = await platform.getBranchStatusCheck(
+        config.branchName,
+        context
+      );
+      // Check if state needs setting
+      if (existingState !== state) {
+        logger.debug(`Updating status check state to failed`);
+        if (config.dryRun) {
+          logger.info(
+            'DRY-RUN: Would set branch status in ' + config.branchName
+          );
+        } else {
+          await platform.setBranchStatus({
+            branchName: config.branchName,
+            context,
+            description,
+            state,
+          });
         }
-      } else {
-        if (config.updatedArtifacts && config.updatedArtifacts.length) {
-          // istanbul ignore if
-          if (config.dryRun) {
-            logger.info(
-              'DRY-RUN: Would ensure comment removal in PR #' + pr.number
-            );
-          } else {
-            await platform.ensureCommentRemoval(pr.number, topic);
-          }
+      }
+    } else {
+      if (config.updatedArtifacts && config.updatedArtifacts.length) {
+        // istanbul ignore if
+        if (config.dryRun) {
+          logger.info(
+            'DRY-RUN: Would ensure comment removal in PR #' + pr.number
+          );
+        } else {
+          await platform.ensureCommentRemoval(pr.number, topic);
         }
-        const prAutomerged = await checkAutoMerge(pr, config);
-        if (prAutomerged) {
-          return 'automerged';
-        }
+      }
+      const prAutomerged = await checkAutoMerge(pr, config);
+      if (prAutomerged) {
+        res.prResult = PrResult.Automerged;
+        return res;
       }
     }
   } catch (err) /* istanbul ignore next */ {
@@ -661,9 +698,7 @@ export async function processBranch(
     }
     // Otherwise don't throw here - we don't want to stop the other renovations
     logger.error({ err }, `Error ensuring PR: ${err.message}`);
+    res.prResult = PrResult.Error;
   }
-  if (!branchExists) {
-    return 'pr-created';
-  }
-  return 'done';
+  return res;
 }

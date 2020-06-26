@@ -1,8 +1,92 @@
 import { logger } from '../../logger';
 import { platform, Pr } from '../../platform';
-import { BranchConfig } from '../common';
+import {
+  BranchConfig,
+  BranchResult,
+  PrResult,
+  ProcessBranchResult,
+} from '../common';
 import { RenovateConfig } from '../../config';
 import { PR_STATE_NOT_OPEN } from '../../constants/pull-requests';
+
+enum Category {
+  Deleted = 'Deleted',
+  Skipped = 'Skipped',
+  BranchApproval = 'BranchApproval',
+  BranchPending = 'BranchPending',
+  Scheduled = 'Scheduled',
+  RateLimited = 'RateLimited',
+  BranchAutomerge = 'BranchAutomerge',
+  PrApproval = 'PrApproval',
+  PrPending = 'PrPending',
+  Open = 'Open',
+  Error = 'Error',
+  Edited = 'Edited',
+  Ignored = 'Ignored',
+  Unknown = 'Unknown',
+}
+
+const categoryHeadings: Record<Category, string[]> = {
+  Deleted: null,
+  Skipped: ['Skipped', 'These branches were skipped and will be tried next run'],
+  BranchApproval: ['Awaiting Branch Approval', 'These branches won\'t be created until approved below'],
+  BranchPending: ['Pending Branch Creation', 'Branch creation is pending for those below'],
+  Scheduled: ['Awaiting Schedule', 'The below branches will be created once in schedule'],
+  RateLimited: ['Rate Limited', 'These branches have not been created yet due to rate limits in place'],
+  BranchAutomerge: ['Awaiting Branch Automerge', 'These branches will automerge once up-to-date and passing tests'],
+  PrApproval: ['Awaiting PR Approval', 'These branches exist but are awaiting PR creation approval below'],
+  PrPending: ['Pending PR Creation', 'These PRs will be created once status criteria is met'],
+  Open: ['Open PRs', 'These PRs have been created'],
+  Error: ['Branches with Errors', 'These branches reported errors'],
+  Edited: ['PRs with Edits', 'These PRs have received commits from someone else and will not be updated further. Tick the checkbox below to abandon the edits and rebase'],
+  Ignored: ['Ignored PRs', 'These PRs were closed/ignored and will not be recreated unless the checkbox below is ticked'],
+  Unknown: ['Unknown status', 'These branches have an unknown status, which indicates that something has gone wrong']
+}
+
+const branchResultMapping: Record<BranchResult, Category> = {
+  Automerged: Category.Deleted,
+  AwaitingApproval: Category.BranchApproval,
+  AwaitingHourlyLimit: Category.RateLimited,
+  AwaitingScheduledCreation: Category.Scheduled,
+  AwaitingScheduledUpdate: null,
+  AwaitingStability: Category.BranchPending,
+  BlockedByClosedPr: Category.Ignored,
+  BlockedByCommits: Category.Edited,
+  Created: null,
+  Deleted: Category.Deleted,
+  ErrorBundler: Category.Error,
+  ErrorNoCommit: Category.Error,
+  ErrorUnknown: Category.Error,
+  NotAttempted: Category.Skipped,
+  NotUpdated: null,
+  PointlessRebase: null,
+  Rebased: null,
+};
+
+const prResultMapping: Record<PrResult, Category> = {
+  Automerged: Category.Deleted,
+  AwaitingApproval: Category.PrApproval,
+  AwaitingGreenBranch: Category.PrPending,
+  AwaitingNotPending: Category.PrPending,
+  BlockedByBranchAutomerge: Category.BranchAutomerge,
+  Created: Category.Open,
+  Error: Category.Error,
+  ErrorAlreadyExists: Category.Error,
+  NotAttempted: Category.PrPending,
+  NotUpdated: Category.Open,
+  Updated: Category.Open,
+};
+
+function mapBranchResToMasterIssueCategory(res: ProcessBranchResult): Category {
+  const category: Category =
+    branchResultMapping[res.branchResult] || prResultMapping[res.branchResult];
+  if (category) return category;
+  logger.warn(
+    { branchResult: res.branchResult, prResult: res.prResult },
+    'Could not map result to master issue category'
+  );
+  return Category.Unknown;
+}
 
 function getListItem(branch: BranchConfig, type: string, pr?: Pr): string {
   let item = ' - [ ] ';
@@ -36,10 +120,7 @@ export async function ensureMasterIssue(
     return;
   }
   logger.debug('Ensuring master issue');
-  if (
-    !branches.length ||
-    branches.every(branch => branch.res === 'automerged')
-  ) {
+  if (!branches.length) {
     if (config.masterIssueAutoclose) {
       logger.debug('Closing master issue');
       if (config.dryRun) {
@@ -64,9 +145,13 @@ export async function ensureMasterIssue(
     }
     return;
   }
+  const categorizedBranches = branches.map(branch => ({
+    ...branch,
+    category: mapBranchResToMasterIssueCategory(branch.res),
+  }));
   let issueBody = `This [master issue](https://renovatebot.com/blog/master-issue) contains a list of Renovate updates and their statuses.\n\n`;
-  const pendingApprovals = branches.filter(
-    branch => branch.res === 'needs-approval'
+  const pendingApprovals = categorizedBranches.filter(
+    branch => branch.category === Category.BranchApproval;
   );
   if (pendingApprovals.length) {
     issueBody += '## Pending Approval\n\n';

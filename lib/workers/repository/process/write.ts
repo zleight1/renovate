@@ -1,11 +1,11 @@
 import { logger, addMeta, removeMeta } from '../../../logger';
-import { processBranch } from '../../branch';
+import { processBranch, BranchResult } from '../../branch';
 import { getPrsRemaining } from './limits';
 import { getLimitRemaining } from '../../global/limits';
 import { RenovateConfig } from '../../../config';
 import { PackageFile } from '../../../manager/common';
 import { AdditionalPackageFiles } from '../../../manager/npm/post-update';
-import { BranchConfig } from '../../common';
+import { BranchConfig, PrResult } from '../../common';
 
 export type WriteUpdateResult = 'done' | 'automerged';
 
@@ -31,20 +31,27 @@ export async function writeUpdates(
     return true;
   });
   let prsRemaining = await getPrsRemaining(config, branches);
+  let alreadyAutomerged = false;
   for (const branch of branches) {
     addMeta({ branch: branch.branchName });
     const res = await processBranch(
       branch,
       prsRemaining <= 0 || getLimitRemaining('prCommitsPerRunLimit') <= 0,
+      alreadyAutomerged,
       packageFiles
     );
     branch.res = res;
-    if (res === 'automerged' && config.automergeType !== 'pr-comment') {
+    if (
+      res.branchResult === BranchResult.Automerged ||
+      (res.prResult === PrResult.Automerged &&
+        config.automergeType !== 'pr-comment')
+    ) {
       // Stop procesing other branches because base branch has been changed
-      return res;
+      alreadyAutomerged = true;
     }
-    prsRemaining -= res === 'pr-created' ? 1 : 0;
+    if (res.branchResult === BranchResult.Created) prsRemaining -= 1;
   }
   removeMeta(['branch']);
+  if (alreadyAutomerged) return 'automerged';
   return 'done';
 }

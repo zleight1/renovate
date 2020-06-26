@@ -6,7 +6,7 @@ import { BranchConfig } from '../common';
 
 export async function commitFilesToBranch(
   config: BranchConfig
-): Promise<string | null> {
+): Promise<{ commitHash: string | null; reason: string }> {
   let updatedFiles = config.updatedPackageFiles.concat(config.updatedArtifacts);
   // istanbul ignore if
   if (is.nonEmptyArray(config.excludeCommitPaths)) {
@@ -24,19 +24,20 @@ export async function commitFilesToBranch(
   }
   if (!is.nonEmptyArray(updatedFiles)) {
     logger.debug(`No files to commit`);
-    return null;
+    return { commitHash: null, reason: 'no-updated-files' };
   }
   logger.debug(`${updatedFiles.length} file(s) to commit`);
   // istanbul ignore if
   if (config.dryRun) {
     logger.info('DRY-RUN: Would commit files to branch ' + config.branchName);
-    return null;
+    return { commitHash: null, reason: 'dry-run' };
   }
   // API will know whether to create new branch or not
-  return platform.commitFilesToBranch({
+  const commitHash = await platform.commitFilesToBranch({
     branchName: config.branchName,
     files: updatedFiles,
     message: config.commitMessage,
     parentBranch: config.baseBranch || undefined,
   });
+  return { commitHash, reason: 'platform' };
 }

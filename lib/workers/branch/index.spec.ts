@@ -22,6 +22,7 @@ import {
   PR_STATE_OPEN,
 } from '../../constants/pull-requests';
 import { StatusResult } from '../../platform/git/storage';
+import { BranchResult } from '.';
 
 jest.mock('./get-updated');
 jest.mock('./schedule');
@@ -66,7 +67,10 @@ describe('workers/branch', () => {
         upgrades: [{ depName: 'some-dep-name' } as never],
       } as never;
       schedule.isScheduledNow.mockReturnValue(true);
-      commit.commitFilesToBranch.mockResolvedValue('abc123');
+      commit.commitFilesToBranch.mockResolvedValue({
+        commitHash: 'abc123',
+        reason: 'platform',
+      });
     });
     afterEach(() => {
       platform.ensureComment.mockClear();
@@ -77,14 +81,24 @@ describe('workers/branch', () => {
     it('skips branch if not scheduled and branch does not exist', async () => {
       schedule.isScheduledNow.mockReturnValueOnce(false);
       const res = await branchWorker.processBranch(config);
-      expect(res).toEqual('not-scheduled');
+      expect(res).toEqual({
+        branchExists: false,
+        branchResult: BranchResult.AwaitingScheduledCreation,
+        prExists: false,
+        prResult: 'NotAttempted',
+      });
     });
     it('skips branch if not scheduled and not updating out of schedule', async () => {
       schedule.isScheduledNow.mockReturnValueOnce(false);
       config.updateNotScheduled = false;
       platform.branchExists.mockResolvedValueOnce(true);
       const res = await branchWorker.processBranch(config);
-      expect(res).toEqual('not-scheduled');
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.AwaitingScheduledUpdate,
+        prExists: false,
+        prResult: 'NotAttempted',
+      });
     });
     it('skips branch if not unpublishSafe + pending', async () => {
       schedule.isScheduledNow.mockReturnValueOnce(true);
@@ -93,7 +107,12 @@ describe('workers/branch', () => {
       config.prCreation = 'not-pending';
       platform.branchExists.mockResolvedValueOnce(true);
       const res = await branchWorker.processBranch(config);
-      expect(res).toEqual('pending');
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.AwaitingStatusChecks,
+        prExists: false,
+        prResult: 'NotAttempted',
+      });
     });
     it('skips branch if not stabilityDays not met', async () => {
       schedule.isScheduledNow.mockReturnValueOnce(true);
@@ -105,7 +124,12 @@ describe('workers/branch', () => {
         } as never,
       ];
       const res = await branchWorker.processBranch(config);
-      expect(res).toEqual('pending');
+      expect(res).toEqual({
+        branchExists: false,
+        branchResult: BranchResult.AwaitingStability,
+        prExists: false,
+        prResult: 'NotAttempted',
+      });
     });
     it('processes branch if not scheduled but updating out of schedule', async () => {
       schedule.isScheduledNow.mockReturnValueOnce(false);
@@ -189,7 +213,12 @@ describe('workers/branch', () => {
         isModified: true,
       } as never);
       const res = await branchWorker.processBranch(config);
-      expect(res).toEqual('pr-edited');
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.BlockedByCommits,
+        prExists: true,
+        prResult: PrResult.NotUpdated,
+      });
     });
     it('skips branch if target branch changed', async () => {
       schedule.isScheduledNow.mockReturnValueOnce(false);
@@ -201,7 +230,12 @@ describe('workers/branch', () => {
       } as never);
       config.baseBranch = 'master';
       const res = await branchWorker.processBranch(config);
-      expect(res).toEqual('pr-edited');
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.BlockedByCommits,
+        prExists: true,
+        prResult: PrResult.NotUpdated,
+      });
     });
     it('returns if pr creation limit exceeded', async () => {
       getUpdated.getUpdatedPackageFiles.mockResolvedValueOnce({
@@ -212,9 +246,13 @@ describe('workers/branch', () => {
         updatedArtifacts: [],
       });
       platform.branchExists.mockResolvedValue(false);
-      expect(await branchWorker.processBranch(config, true)).toEqual(
-        'pr-hourly-limit-reached'
-      );
+      const res = await branchWorker.processBranch(config, true);
+      expect(res).toEqual({
+        branchExists: false,
+        branchResult: BranchResult.AwaitingHourlyLimit,
+        prExists: false,
+        prResult: PrResult.NotAttempted,
+      });
     });
     it('returns if no work', async () => {
       getUpdated.getUpdatedPackageFiles.mockResolvedValueOnce({
@@ -225,8 +263,17 @@ describe('workers/branch', () => {
         updatedArtifacts: [],
       });
       platform.branchExists.mockResolvedValueOnce(false);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
-      expect(await branchWorker.processBranch(config)).toEqual('no-work');
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: null,
+        reason: 'no-updated-files',
+      });
+      const res = await branchWorker.processBranch(config);
+      expect(res).toEqual({
+        branchExists: false,
+        branchResult: BranchResult.ErrorNoCommit,
+        prExists: false,
+        prResult: PrResult.NotAttempted,
+      });
     });
     it('returns if branch automerged', async () => {
       getUpdated.getUpdatedPackageFiles.mockReturnValueOnce({
@@ -237,9 +284,18 @@ describe('workers/branch', () => {
         updatedArtifacts: [{}],
       } as never);
       platform.branchExists.mockResolvedValueOnce(true);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: 'abc123',
+        reason: 'platform',
+      });
       automerge.tryBranchAutomerge.mockResolvedValueOnce('automerged');
-      await branchWorker.processBranch(config);
+      const res = await branchWorker.processBranch(config);
+      expect(res).toEqual({
+        branchExists: false,
+        branchResult: BranchResult.Automerged,
+        prExists: false,
+        prResult: PrResult.NotAttempted,
+      });
       expect(statusChecks.setUnpublishable).toHaveBeenCalledTimes(1);
       expect(automerge.tryBranchAutomerge).toHaveBeenCalledTimes(1);
       expect(prWorker.ensurePr).toHaveBeenCalledTimes(0);
@@ -255,15 +311,22 @@ describe('workers/branch', () => {
       } as never);
       platform.branchExists.mockResolvedValueOnce(false);
       automerge.tryBranchAutomerge.mockResolvedValueOnce('automerged');
-      await branchWorker.processBranch({
+      const res = await branchWorker.processBranch({
         ...config,
         requiredStatusChecks: null,
+      });
+      expect(res).toEqual({
+        branchExists: false,
+        branchResult: BranchResult.Automerged,
+        prExists: false,
+        prResult: PrResult.NotAttempted,
       });
       expect(statusChecks.setUnpublishable).toHaveBeenCalledTimes(1);
       expect(automerge.tryBranchAutomerge).toHaveBeenCalledTimes(1);
       expect(prWorker.ensurePr).toHaveBeenCalledTimes(0);
     });
 
+    /*
     it('returns if branch automerged (dry-run)', async () => {
       getUpdated.getUpdatedPackageFiles.mockResolvedValueOnce({
         updatedPackageFiles: [{}],
@@ -273,13 +336,20 @@ describe('workers/branch', () => {
         updatedArtifacts: [{}],
       } as never);
       platform.branchExists.mockResolvedValueOnce(true);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({ commitHash: 'abc123', reason: 'platform'});
       automerge.tryBranchAutomerge.mockResolvedValueOnce('automerged');
-      await branchWorker.processBranch({ ...config, dryRun: true });
+      const res = await branchWorker.processBranch({ ...config, dryRun: true });
+      expect(res).toEqual({
+        branchExists: false,
+        branchResult: BranchResult.Automerged,
+        prExists: false,
+        prResult: PrResult.NotAttempted,
+      });
       expect(statusChecks.setUnpublishable).toHaveBeenCalledTimes(1);
       expect(automerge.tryBranchAutomerge).toHaveBeenCalledTimes(1);
       expect(prWorker.ensurePr).toHaveBeenCalledTimes(0);
     });
+    */
     it('returns if branch exists and prCreation set to approval', async () => {
       getUpdated.getUpdatedPackageFiles.mockResolvedValueOnce({
         updatedPackageFiles: [{}],
@@ -289,14 +359,21 @@ describe('workers/branch', () => {
         updatedArtifacts: [{}],
       } as never);
       platform.branchExists.mockResolvedValueOnce(true);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: 'abc123',
+        reason: 'platform',
+      });
       automerge.tryBranchAutomerge.mockResolvedValueOnce('failed');
       prWorker.ensurePr.mockResolvedValueOnce({
         prResult: PrResult.AwaitingApproval,
       });
-      expect(await branchWorker.processBranch(config)).toEqual(
-        'needs-pr-approval'
-      );
+      const res = await branchWorker.processBranch(config);
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.Rebased,
+        prExists: false,
+        prResult: PrResult.AwaitingApproval,
+      });
     });
     it('returns if branch exists but pending', async () => {
       expect.assertions(1);
@@ -308,12 +385,21 @@ describe('workers/branch', () => {
         updatedArtifacts: [{}],
       } as never);
       platform.branchExists.mockResolvedValueOnce(true);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: 'abc123',
+        reason: 'platform',
+      });
       automerge.tryBranchAutomerge.mockResolvedValueOnce('failed');
       prWorker.ensurePr.mockResolvedValueOnce({
         prResult: PrResult.AwaitingNotPending,
       });
-      expect(await branchWorker.processBranch(config)).toEqual('pending');
+      const res = await branchWorker.processBranch(config);
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.Rebased,
+        prExists: false,
+        prResult: PrResult.AwaitingNotPending,
+      });
     });
     it('returns if branch exists but updated', async () => {
       expect.assertions(3);
@@ -324,13 +410,17 @@ describe('workers/branch', () => {
         artifactErrors: [],
         updatedArtifacts: [{}],
       } as never);
-      expect(
-        await branchWorker.processBranch({
-          ...config,
-          requiredStatusChecks: null,
-          prCreation: 'not-pending',
-        })
-      ).toEqual('pending');
+      const res = await branchWorker.processBranch({
+        ...config,
+        requiredStatusChecks: null,
+        prCreation: 'not-pending',
+      });
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.Created,
+        prExists: false,
+        prResult: PrResult.AwaitingNotPending,
+      });
 
       expect(automerge.tryBranchAutomerge).toHaveBeenCalledTimes(0);
       expect(prWorker.ensurePr).toHaveBeenCalledTimes(0);
@@ -346,11 +436,14 @@ describe('workers/branch', () => {
       platform.branchExists.mockResolvedValueOnce(true);
       automerge.tryBranchAutomerge.mockResolvedValueOnce('failed');
       prWorker.ensurePr.mockResolvedValueOnce({
-        result: PrResult.Created,
+        prResult: PrResult.Created,
         pr: {},
       } as never);
       prWorker.checkAutoMerge.mockResolvedValueOnce(true);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: 'abc123',
+        reason: 'platform',
+      });
       await branchWorker.processBranch(config);
       expect(prWorker.ensurePr).toHaveBeenCalledTimes(1);
       expect(platform.ensureCommentRemoval).toHaveBeenCalledTimes(1);
@@ -367,11 +460,14 @@ describe('workers/branch', () => {
       platform.branchExists.mockResolvedValueOnce(true);
       automerge.tryBranchAutomerge.mockResolvedValueOnce('failed');
       prWorker.ensurePr.mockResolvedValueOnce({
-        result: PrResult.Created,
+        prResult: PrResult.Created,
         pr: {},
       } as never);
       prWorker.checkAutoMerge.mockResolvedValueOnce(true);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: 'abc123',
+        reason: 'platform',
+      });
       await branchWorker.processBranch(config);
       expect(platform.ensureComment).toHaveBeenCalledTimes(1);
       // expect(platform.ensureCommentRemoval.mock.calls).toHaveLength(0);
@@ -389,12 +485,15 @@ describe('workers/branch', () => {
       platform.branchExists.mockResolvedValueOnce(true);
       automerge.tryBranchAutomerge.mockResolvedValueOnce('failed');
       prWorker.ensurePr.mockResolvedValueOnce({
-        result: PrResult.Created,
+        prResult: PrResult.Created,
         pr: {},
       } as never);
       prWorker.checkAutoMerge.mockResolvedValueOnce(true);
       config.releaseTimestamp = '2018-04-26T05:15:51.877Z';
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: 'abc123',
+        reason: 'platform',
+      });
       await branchWorker.processBranch(config);
       expect(platform.ensureComment).toHaveBeenCalledTimes(1);
       // expect(platform.ensureCommentRemoval.mock.calls).toHaveLength(0);
@@ -412,12 +511,15 @@ describe('workers/branch', () => {
       platform.branchExists.mockResolvedValueOnce(true);
       automerge.tryBranchAutomerge.mockResolvedValueOnce('failed');
       prWorker.ensurePr.mockResolvedValueOnce({
-        result: PrResult.Created,
+        prResult: PrResult.Created,
         pr: {},
       } as never);
       prWorker.checkAutoMerge.mockResolvedValueOnce(true);
       config.releaseTimestamp = new Date().toISOString();
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: 'abc123',
+        reason: 'platform',
+      });
       await branchWorker.processBranch(config);
       expect(platform.ensureComment).toHaveBeenCalledTimes(1);
       // expect(platform.ensureCommentRemoval.mock.calls).toHaveLength(0);
@@ -435,7 +537,7 @@ describe('workers/branch', () => {
       platform.branchExists.mockResolvedValueOnce(false);
       automerge.tryBranchAutomerge.mockResolvedValueOnce('failed');
       prWorker.ensurePr.mockResolvedValueOnce({
-        result: PrResult.Created,
+        prResult: PrResult.Created,
         pr: {},
       } as never);
       prWorker.checkAutoMerge.mockResolvedValueOnce(true);
@@ -456,11 +558,14 @@ describe('workers/branch', () => {
       platform.branchExists.mockResolvedValueOnce(true);
       automerge.tryBranchAutomerge.mockResolvedValueOnce('failed');
       prWorker.ensurePr.mockResolvedValueOnce({
-        result: PrResult.Created,
+        prResult: PrResult.Created,
         pr: {},
       } as never);
       prWorker.checkAutoMerge.mockResolvedValueOnce(true);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: 'abc123',
+        reason: 'platform',
+      });
       await branchWorker.processBranch(config);
       expect(platform.ensureComment).toHaveBeenCalledTimes(1);
       // expect(platform.ensureCommentRemoval.mock.calls).toHaveLength(0);
@@ -504,9 +609,13 @@ describe('workers/branch', () => {
       checkExisting.prAlreadyExisted.mockResolvedValueOnce({
         state: PR_STATE_CLOSED,
       });
-      expect(
-        await branchWorker.processBranch({ ...config, dryRun: true })
-      ).toEqual('already-existed');
+      const res = await branchWorker.processBranch({ ...config, dryRun: true });
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.BlockedByClosedPr,
+        prExists: false,
+        prResult: PrResult.NotAttempted,
+      });
     });
 
     it('branch pr no rebase (dry run)', async () => {
@@ -515,9 +624,13 @@ describe('workers/branch', () => {
         state: PR_STATE_OPEN,
         isModified: true,
       } as never);
-      expect(
-        await branchWorker.processBranch({ ...config, dryRun: true })
-      ).toEqual('pr-edited');
+      const res = await branchWorker.processBranch({ ...config, dryRun: true });
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.BlockedByCommits,
+        prExists: true,
+        prResult: PrResult.NotUpdated,
+      });
     });
 
     it('branch pr no schedule lockfile (dry run)', async () => {
@@ -538,17 +651,24 @@ describe('workers/branch', () => {
       } as never);
 
       schedule.isScheduledNow.mockReturnValueOnce(false);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: null,
+        reason: 'dry-run',
+      });
 
-      expect(
-        await branchWorker.processBranch({
-          ...config,
-          dryRun: true,
-          updateType: 'lockFileMaintenance',
-          parentBranch: undefined,
-          updatedArtifacts: [{ name: '|delete|', contents: 'dummy' }],
-        })
-      ).toEqual('done');
+      const res = await branchWorker.processBranch({
+        ...config,
+        dryRun: true,
+        updateType: 'lockFileMaintenance',
+        parentBranch: undefined,
+        updatedArtifacts: [{ name: '|delete|', contents: 'dummy' }],
+      });
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.NotUpdated,
+        prExists: true,
+        prResult: PrResult.NotUpdated,
+      });
     });
 
     it('branch pr no schedule (dry run)', async () => {
@@ -570,17 +690,24 @@ describe('workers/branch', () => {
 
       schedule.isScheduledNow.mockReturnValueOnce(false);
       prWorker.ensurePr.mockResolvedValueOnce({
-        result: PrResult.Created,
+        prResult: PrResult.Created,
         pr: {},
       } as never);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
-      expect(
-        await branchWorker.processBranch({
-          ...config,
-          dryRun: true,
-          artifactErrors: [{}],
-        })
-      ).toEqual('done');
+      commit.commitFilesToBranch.mockResolvedValueOnce({
+        commitHash: null,
+        reason: 'dry-run',
+      });
+      const res = await branchWorker.processBranch({
+        ...config,
+        dryRun: true,
+        artifactErrors: [{}],
+      });
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.NotUpdated,
+        prExists: true,
+        prResult: PrResult.NotUpdated,
+      });
     });
 
     it('branch pr no schedule', async () => {
@@ -599,17 +726,23 @@ describe('workers/branch', () => {
         body: `- [x] <!-- rebase-check -->`,
         isModified: true,
       } as never);
-
       schedule.isScheduledNow.mockReturnValueOnce(false);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
-      expect(
-        await branchWorker.processBranch({
-          ...config,
-          updateType: 'lockFileMaintenance',
-          parentBranch: undefined,
-          updatedArtifacts: [{ name: '|delete|', contents: 'dummy' }],
-        })
-      ).toEqual('done');
+      prWorker.ensurePr.mockResolvedValueOnce({
+        prResult: PrResult.Updated,
+        pr: {},
+      } as never);
+      const res = await branchWorker.processBranch({
+        ...config,
+        updateType: 'lockFileMaintenance',
+        parentBranch: undefined,
+        updatedArtifacts: [{ name: '|delete|', contents: 'dummy' }],
+      });
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.Rebased,
+        prExists: true,
+        prResult: PrResult.Updated,
+      });
     });
 
     it('executes post-upgrade tasks if trust is high', async () => {
@@ -638,9 +771,11 @@ describe('workers/branch', () => {
       fs.readFile.mockResolvedValueOnce(Buffer.from('modified file content'));
 
       schedule.isScheduledNow.mockReturnValueOnce(false);
-      commit.commitFilesToBranch.mockResolvedValueOnce(null);
-
-      const result = await branchWorker.processBranch({
+      prWorker.ensurePr.mockResolvedValueOnce({
+        prResult: PrResult.Updated,
+        pr: {},
+      } as never);
+      const res = await branchWorker.processBranch({
         ...config,
         postUpgradeTasks: {
           commands: ['echo 1', 'disallowed task'],
@@ -650,7 +785,12 @@ describe('workers/branch', () => {
         allowedPostUpgradeCommands: ['^echo 1$'],
       });
 
-      expect(result).toEqual('done');
+      expect(res).toEqual({
+        branchExists: true,
+        branchResult: BranchResult.Rebased,
+        prExists: true,
+        prResult: PrResult.Updated,
+      });
       expect(exec.exec).toHaveBeenCalledWith('echo 1', { cwd: '/localDir' });
     });
   });

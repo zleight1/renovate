@@ -45,32 +45,46 @@ export interface BranchUpgradeConfig
   updatedArtifacts?: FileData[];
 }
 
+export enum BranchResult {
+  Automerged = 'Automerged',
+  AwaitingApproval = 'AwaitingApproval',
+  AwaitingHourlyLimit = 'AwaitingHourlyLimit',
+  AwaitingScheduledCreation = 'AwaitingScheduledCreation',
+  AwaitingScheduledUpdate = 'AwaitingScheduledUpdate',
+  AwaitingStability = 'AwaitingStability',
+  BlockedByClosedPr = 'BlockedByClosedPr',
+  BlockedByCommits = 'BlockedByCommits',
+  Created = 'Created',
+  Deleted = 'Deleted',
+  ErrorBundler = 'ErrorBundler',
+  ErrorNoCommit = 'ErrorNoCommit',
+  ErrorUnknown = 'ErrorUnknown',
+  NotUpdated = 'NotUpdated',
+  PointlessRebase = 'PointlessRebase',
+  Rebased = 'Rebased',
+  NotAttempted = 'NotAttempted',
+}
+
 export enum PrResult {
+  Automerged = 'Automerged',
   AwaitingApproval = 'AwaitingApproval',
   AwaitingGreenBranch = 'AwaitingGreenBranch',
   AwaitingNotPending = 'AwaitingNotPending',
-  BlockeddByBranchAutomerge = 'BlockeddByBranchAutomerge',
+  BlockedByBranchAutomerge = 'BlockedByBranchAutomerge',
   Created = 'Created',
   Error = 'Error',
   ErrorAlreadyExists = 'ErrorAlreadyExists',
+  NotAttempted = 'NotAttempted',
   NotUpdated = 'NotUpdated',
   Updated = 'Updated',
 }
 
-export type ProcessBranchResult =
-  | 'already-existed'
-  | 'automerged'
-  | 'done'
-  | 'error'
-  | 'needs-approval'
-  | 'needs-pr-approval'
-  | 'not-scheduled'
-  | 'no-work'
-  | 'pending'
-  | 'pr-created'
-  | 'pr-edited'
-  | 'pr-hourly-limit-reached'
-  | 'rebase';
+export interface ProcessBranchResult {
+  branchExists: boolean;
+  branchResult: BranchResult;
+  prExists: boolean;
+  prResult: PrResult;
+}
 
 export interface BranchConfig
   extends BranchUpgradeConfig,
