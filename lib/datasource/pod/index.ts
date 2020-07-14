@@ -41,7 +41,7 @@ function releasesGithubUrl(
 function handleError(lookupName: string, err: HttpError): void {
   const errorData = { lookupName, err };
 
-  const statusCode = err.response?.statusCode;
+  const statusCode = err.statusCode;
   if (statusCode === 429 || (statusCode >= 500 && statusCode < 600)) {
     logger.warn({ lookupName, err }, `CocoaPods registry failure`);
     throw new ExternalHostError(err);

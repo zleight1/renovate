@@ -7,8 +7,8 @@
     "renovate-config-validator": "dist/config-validator.js"
   },
   "scripts": {
-    "build": "run-s clean generate:* compile:*",
-    "clean": "rimraf dist",
+    "build": "run-s clean prepare:* generate:* compile:*",
+    "clean": "rimraf dist tmp",
     "clean-cache": "node bin/clean-cache.js",
     "compile:ts": "tsc -p tsconfig.app.json",
     "compile:dts": "tsc -p tsconfig.dts.json",

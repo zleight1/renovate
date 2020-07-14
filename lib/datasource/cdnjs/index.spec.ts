@@ -87,7 +87,7 @@ describe('datasource/cdnjs', () => {
       ).rejects.toThrow(EXTERNAL_HOST_ERROR);
       expect(httpMock.getTrace()).toMatchSnapshot();
     });
-    it('returns null for unknown error', async () => {
+    it('throws for unknown error', async () => {
       httpMock.scope(baseUrl).get(pathFor('foo/bar')).replyWithError('error');
       await expect(
         getPkgReleases({ datasource, depName: 'foo/bar' })

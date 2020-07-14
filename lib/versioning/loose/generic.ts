@@ -189,7 +189,6 @@ export abstract class GenericVersioningApi<
     return versions.find((v) => this.equals(v, range)) || null;
   }
 
-  // eslint-disable-next-line class-methods-use-this
   getNewValue(newValueConfig: NewValueConfig): string {
     const { toVersion } = newValueConfig || {};
     return toVersion;

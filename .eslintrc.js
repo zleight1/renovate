@@ -42,6 +42,7 @@ module.exports = {
     'prefer-destructuring': 0,
     'prefer-template': 0,
     'no-underscore-dangle': 0,
+    'class-methods-use-this': 0,
     // 'no-unused-vars': 2,
 
     'sort-imports': [

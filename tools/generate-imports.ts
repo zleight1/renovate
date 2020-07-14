@@ -9,12 +9,13 @@ if (!fs.existsSync('lib')) {
   shell.exit(0);
 }
 
-function findModules(dirname: string): string[] {
+function findModules(dirname: string, excludes: string[] = []): string[] {
   return fs
     .readdirSync(dirname, { withFileTypes: true })
     .filter((dirent) => dirent.isDirectory())
     .map((dirent) => dirent.name)
     .filter((name) => !name.startsWith('__'))
+    .filter((name) => !excludes.includes(name))
     .sort();
 }
 async function updateFile(file: string, code: string): Promise<void> {
@@ -68,7 +69,12 @@ async function generate({
 (async () => {
   try {
     // datasources
-    await generate({ path: 'datasource', types: ['DatasourceApi'] });
+    const datasourceExcludes = ['cdnjs', 'clojure', 'crate'];
+    await generate({
+      path: 'datasource',
+      types: ['DatasourceApi'],
+      excludes: datasourceExcludes,
+    });
 
     // managers
     await generate({ path: 'manager', types: ['ManagerApi'] });
