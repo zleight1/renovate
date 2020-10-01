@@ -39,6 +39,7 @@ import * as azureHelper from './azure-helper';
 import { AzurePr } from './types';
 import {
   getBranchNameWithoutRefsheadsPrefix,
+  getGitStatusContextCombinedName,
   getNewBranchName,
   getRenovatePRFormat,
 } from './util';
@@ -294,7 +295,7 @@ export async function getBranchStatusCheck(
     getBranchNameWithoutRefsheadsPrefix(branchName)
   );
   // only grab the latest statuses, it will group any by context
-  const statuses = await azureApiGit.getStatuses(
+  let statuses = await azureApiGit.getStatuses(
     branch.commit.commitId,
     config.repoId,
     undefined,
@@ -302,12 +303,18 @@ export async function getBranchStatusCheck(
     undefined,
     true
   );
-  if (statuses.length === 0) {
+  if (statuses.length === 0 && !context) {
     logger.trace(
-      `No branch statuses found on ${branchName}, defaulting to success`
+      `No branch statuses found on ${branchName}, and no specific context was requested, defaulting to success`
     );
     // no statuses so we'll assume its fine
     return BranchStatus.green;
+  }
+  if (context) {
+    statuses = statuses.filter(
+      (status) => getGitStatusContextCombinedName(status.context) === context
+    );
+    logger.trace(`Filtered statuses to only those matching ${context}`);
   }
   if (statuses.every((status) => status.state === GitStatusState.Succeeded)) {
     logger.trace(`All branch statuses found on ${branchName} were successful`);
@@ -343,9 +350,29 @@ export async function getBranchStatus(
     return BranchStatus.green;
   }
   if (requiredStatusChecks.length) {
-    // This is Unsupported
-    logger.warn({ requiredStatusChecks }, `Unsupported requiredStatusChecks`);
-    return BranchStatus.red;
+    const requiredStatusResults = [];
+    for (const requiredCheck of requiredStatusChecks) {
+      const requiredCheckStatus = await getBranchStatusCheck(
+        branchName,
+        requiredCheck
+      );
+      requiredStatusResults.push(requiredCheckStatus);
+      logger.trace(
+        `Status found for required check ${requiredCheck} is ${requiredCheckStatus}`
+      );
+    }
+    if (requiredStatusResults.some((status) => status === BranchStatus.red)) {
+      logger.debug('At least one required status check is red');
+      return BranchStatus.red;
+    }
+    if (
+      requiredStatusResults.some((status) => status === BranchStatus.yellow)
+    ) {
+      logger.debug('At least one required status check is yellow');
+      return BranchStatus.yellow;
+    }
+
+    return BranchStatus.green;
   }
   const branchStatusCheck = await getBranchStatusCheck(branchName, null);
   return branchStatusCheck;

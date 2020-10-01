@@ -1,5 +1,6 @@
 import {
   getBranchNameWithoutRefsheadsPrefix,
+  getGitStatusContextCombinedName,
   getNewBranchName,
   getRenovatePRFormat,
 } from './util';
@@ -13,6 +14,26 @@ describe('platform/azure/helpers', () => {
     it('should be the same', () => {
       const res = getNewBranchName('refs/heads/testBB');
       expect(res).toBe(`refs/heads/testBB`);
+    });
+  });
+  describe('getGitStatusContextCombinedName', () => {
+    it('should return undefined if no context passed', () => {
+      const contextName = getGitStatusContextCombinedName();
+      expect(contextName).toBeUndefined();
+    });
+    it('should combine valid genre and name with slash', () => {
+      const contextName = getGitStatusContextCombinedName({
+        genre: 'my-genre',
+        name: 'status-name',
+      });
+      expect(contextName).toMatch('my-genre/status-name');
+    });
+    it('should combine valid empty genre and name without a slash', () => {
+      const contextName = getGitStatusContextCombinedName({
+        genre: undefined,
+        name: 'status-name',
+      });
+      expect(contextName).toMatch('status-name');
     });
   });
 
